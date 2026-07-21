@@ -15,10 +15,17 @@ async function startup(){
 
 async function checkForRetries(){
     try{
-    const retries=await DeliveryJob.find({status:'failed',nextRetryAt:{$lte:new Date()}});
+    const retries=await DeliveryJob.find({
+        status: {$in: ['failed','pending']},
+        nextRetryAt: {$lte: new Date()}
+    });
     for(let retry of retries){
+        if (retry.status === 'delivered' || retry.status === 'dead_letter') {
+            continue;
+        }
         await redis.xadd('deliveries:stream','*','deliveryJobId',retry._id.toString());
         retry.status='pending';
+        retry.nextRetryAt=null;
         await retry.save();
     }
     console.log(`${retries.length} jobs were re-queued`);
@@ -29,6 +36,10 @@ async function checkForRetries(){
 
 async function run(){
     await startup();
-    setInterval(checkForRetries,10000);
+    async function loop(){
+        await checkForRetries();
+        setTimeout(loop,10000)
+    };
+    loop();
 }
 run();

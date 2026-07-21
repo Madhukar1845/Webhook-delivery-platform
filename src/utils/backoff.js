@@ -5,7 +5,6 @@ function calculateBackoff(attemptNumber,baseDelayMs=1000,maxDelayMs=300000){
 }
 
 function scheduleRetry(deliveryJob){
-    deliveryJob.attempts+=1;
     const MAX_ATTEMPTS=8;
     if (deliveryJob.attempts>=MAX_ATTEMPTS){
         deliveryJob.status='dead_letter';

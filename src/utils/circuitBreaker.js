@@ -4,12 +4,12 @@ const COOLDOWN_MS=30000;
 async function getBreakerState(redis,subscriberId){
     const key=`breaker:${subscriberId}`;
     const data=await redis.hgetall(key);
-    if (Object.keys(data).length==0) return {state:'CLOSED',failureCount:0,openedAt:null}
-    else{
-        data.failureCount=Number(data.failureCount);
-        data.openedAt=Number(data.openedAt);
-        return data;
-    }
+    if (Object.keys(data).length==0) return {state:'CLOSED',failureCount:0,openedAt:null};
+    return {
+        state:data.state || 'CLOSED',
+        failureCount:Number(data.failureCount) || 0,
+        openedAt:data.openedAt ? Number(data.openedAt) : null,
+    };
 }
 
 async function recordSuccess(redis,subscriberId){
@@ -27,7 +27,7 @@ async function recordFailure(redis,subscriberId){
         if (breaker.failureCount>=THRESHOLD){
             await redis.hset(key,'state','OPEN','failureCount',breaker.failureCount,'openedAt',Date.now());
         }else{
-            await redis.hset(key,'failureCount',breaker.failureCount);
+            await redis.hset(key,'state','CLOSED','failureCount',breaker.failureCount);
         }
     }
 }
@@ -45,5 +45,6 @@ async function canAttempt(redis,subscriberId){
             return false;
         }
     }
+    return true;
 }
 module.exports={getBreakerState,recordSuccess,recordFailure,canAttempt};

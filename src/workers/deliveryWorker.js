@@ -13,49 +13,73 @@ require('dotenv').config();
 
 const redis=new Redis(process.env.REDIS_URL);
 async function attemptDelivery(deliveryJobId){
+    console.log('--- attemptDelivery START for', deliveryJobId);
     const job=await DeliveryJob.findById(deliveryJobId);
+    if (!job) {
+        console.log('EXIT: job not found');
+        return;
+    }
+    console.log('job status at start:', job.status, 'attempts:', job.attempts);
+
+    if(job.status=='delivered' || job.status=='dead_letter'){
+        console.log('EXIT: already finalized');
+        return;
+    }
     const subscription=await Subscription.findById(job.subscriptionId);
     const event=await Event.findById(job.eventId);
     const subscriberId=subscription._id.toString();
     const attempt=await canAttempt(redis,subscriberId);
+    console.log('canAttempt result:', attempt);
     if (!attempt){
-        console.log('Circuit Open, Skipping..');
+        console.log('EXIT: circuit open');
+        scheduleRetry(job);
+        job.lastAttemptAt=new Date();
+        await job.save();
+        console.log('after save, job status:', job.status);
         return;
     }
     const consumerToken=await tryConsumeToken(redis,subscriberId);
+    console.log('tryConsumeToken result:', consumerToken);
     if (!consumerToken){
-        console.log('Rate Limited, Skipping...');
+        console.log('EXIT: rate limited');
+        scheduleRetry(job);
+        job.lastAttemptAt=new Date();
+        await job.save();
+        console.log('after save, job status:', job.status);
         return;
     }
     const payload=JSON.stringify({type:event.type,payload:event.payload});
     const sign=signPayload(payload,subscription.secret);
     const start=Date.now();
+    job.attempts+=1;
     try{
-    const res=await axios.post(subscription.url,payload,{
-        headers:{
-        'Content-Type':'application/json',
-        'X-Signature':sign,
-        'X-Event-Id':getIdempotencyKey(job)
-    },
-        timeout:5000
-    });
-    const end=Date.now();
-    const latencyMs=end-start;
-    await recordSuccess(redis,subscriberId);
-    job.status='delivered';
-    job.latencyMs=latencyMs;
-    job.responseCode=res.status;
-    job.lastAttemptAt=new Date();
-    await job.save();
+        const res=await axios.post(subscription.url,payload,{
+            headers:{
+                'Content-Type':'application/json',
+                'X-Signature':sign,
+                'X-Event-Id':getIdempotencyKey(job)
+            },
+            timeout:5000
+        });
+        const end=Date.now();
+        const latencyMs=end-start;
+        await recordSuccess(redis,subscriberId);
+        job.status='delivered';
+        job.nextRetryAt=null;
+        job.latencyMs=latencyMs;
+        job.responseCode=res.status;
+        job.lastAttemptAt=new Date();
+        await job.save();
+        console.log('EXIT: delivered successfully');
     }catch(err){
-        console.log('Delivery failed!',err.message);
+        console.log('EXIT: catch block, error:', err.message);
         await recordFailure(redis,subscriberId);
         scheduleRetry(job);
         job.lastAttemptAt=new Date()
         await job.save();
+        console.log('after save, job status:', job.status);
     }
 }
-
 async function startup(){
     try{
         await mongoose.connect(process.env.MONGO_URI)
@@ -86,7 +110,12 @@ async function mainLoop(){
             for(let job of deliveryJobs){
                 const [jobId,data]=job;
                 const deliveryJobId=parseStreamFields(data).deliveryJobId;
-                await attemptDelivery(deliveryJobId);
+                console.log('>>> Processing deliveryJobId:', deliveryJobId);
+                try {
+                    await attemptDelivery(deliveryJobId);
+                } catch (err) {
+                    console.log('>>> attemptDelivery THREW:', err.message);
+                }
                 await redis.xack('deliveries:stream','delivery-group',jobId);
             }
         }catch(err){
